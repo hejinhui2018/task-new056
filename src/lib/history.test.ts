@@ -3,7 +3,17 @@ import { History } from './history';
 import type { PlanState } from '../types';
 
 function state(n: number): PlanState {
-  return { booths: [{ id: String(n), x: n, y: 0, w: 1, h: 1, orientation: 'south' as const, label: String(n), color: '#000' }] };
+  return { booths: [{ id: String(n), x: n, y: 0, w: 1, h: 1, rotation: 0, orientation: 'south' as const, label: String(n), color: '#000' }] };
+}
+
+/** 带旋转的展位快照（验证撤销/重做不丢角度与未旋转尺寸）。 */
+function rotatedState(rotation: number): PlanState {
+  return {
+    booths: [{
+      id: 'r', x: 3, y: 2, w: 6, h: 2, rotation,
+      orientation: 'west' as const, label: 'R', color: '#000',
+    }],
+  };
 }
 
 describe('History 撤销/重做', () => {
@@ -78,5 +88,23 @@ describe('History 撤销/重做', () => {
     expect(h.current).toBe(99);
     expect(h.canUndo).toBe(false);
     expect(h.canRedo).toBe(false);
+  });
+
+  it('旋转操作的撤销/重做精确保持角度与未旋转尺寸', () => {
+    const h = new History<PlanState>(rotatedState(0));
+    h.commit(rotatedState(Math.PI / 2));
+    h.commit(rotatedState(Math.PI));
+    // 撤销回 90°：rotation、w/h、锚点都应原样
+    const back90 = h.undo();
+    const b90 = back90.booths[0];
+    expect(b90.rotation).toBeCloseTo(Math.PI / 2, 12);
+    expect(b90.w).toBe(6);
+    expect(b90.h).toBe(2);
+    expect(b90.x).toBe(3);
+    // 重做恢复 180°
+    const again = h.redo();
+    expect(again.booths[0].rotation).toBeCloseTo(Math.PI, 12);
+    expect(again.booths[0].w).toBe(6);
+    expect(again.booths[0].h).toBe(2);
   });
 });

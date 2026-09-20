@@ -15,6 +15,7 @@ function booth(p: Partial<Booth> & Pick<Partial<Booth>, never>): Booth {
     y: p.y ?? 0,
     w: p.w ?? 2,
     h: p.h ?? 2,
+    rotation: p.rotation ?? 0,
     orientation: p.orientation ?? 'south',
     label: p.label ?? 'T',
     color: '#000',
@@ -126,6 +127,54 @@ describe('findExitPath 疏散寻路', () => {
     expect(end.y).toBeLessThan(1);
     expect(end.x).toBeGreaterThanOrEqual(14);
     expect(end.x).toBeLessThanOrEqual(16.5);
+  });
+});
+
+describe('旋转后 footprint 作为寻路障碍', () => {
+  const cols = Math.round(HALL_WIDTH / PATH_GRID);
+  const rows = Math.round(HALL_HEIGHT / PATH_GRID);
+  const D90 = Math.PI / 2;
+
+  it('90° 旋转展位：实体格被挡、外接 AABB 外的格不挡、贴边格可通行', () => {
+    // w=4,h=2 锚点 (6,2) 顺时针 90° -> 占据 x∈[4,6]、y∈[2,6]
+    const b = booth({ x: 6, y: 2, w: 4, h: 2, rotation: D90 });
+    expect(isBlockedCell(9, 5, [b], cols, rows)).toBe(true); // 格 [4.5,5]×[2.5,3]
+    expect(isBlockedCell(11, 5, [b], cols, rows)).toBe(true); // 格 [5.5,6]×[2.5,3]
+    expect(isBlockedCell(12, 5, [b], cols, rows)).toBe(false); // 格 [6,6.5]：仅贴右边
+    expect(isBlockedCell(13, 5, [b], cols, rows)).toBe(false); // 右边之外
+    expect(isBlockedCell(9, 3, [b], cols, rows)).toBe(false); // 实体上方
+  });
+
+  it('45° 旋转：落在旧外接 AABB 角落、但在斜矩形外的格不被误挡', () => {
+    const b = booth({ x: 4, y: 4, w: 2, h: 2, rotation: Math.PI / 4 });
+    // 含展位角 (4,4) 的格与斜矩形正面积相交 -> 挡
+    expect(isBlockedCell(8, 8, [b], cols, rows)).toBe(true);
+    // 外接 AABB 右下/右上角内但斜矩形之外的格 -> 不挡
+    expect(isBlockedCell(10, 8, [b], cols, rows)).toBe(false); // [5,5.5]×[4,4.5]
+  });
+
+  it('旋转障碍的疏散路径不穿越旋转后实体', () => {
+    // 45° 斜放围挡把左下区域斜向切开，接待点仍需绕出
+    const part = booth({
+      id: 'wall', x: 3, y: 5, w: 6, h: 1, rotation: Math.PI / 4, kind: 'partition',
+    });
+    const s = booth({ id: 's', x: 0.5, y: 8.5, w: 2, h: 2, orientation: 'north' });
+    const r = findExitPath([part, s], receptionPoint(s));
+    expect(r.reachable).toBe(true);
+    for (let i = 1; i < r.path.length; i++) {
+      const p = r.path[i];
+      const cx = Math.round((p.x - PATH_GRID / 2) / PATH_GRID);
+      const cy = Math.round((p.y - PATH_GRID / 2) / PATH_GRID);
+      expect(isBlockedCell(cx, cy, [part], cols, rows)).toBe(false);
+    }
+  });
+
+  it('旋转后盖住出口网格的展位同样识别为封堵', () => {
+    const south = EXITS.find((e) => e.wall === 'south')!;
+    const blocker = booth({
+      id: 'blk', x: 3.5, y: 12.5, w: 4, h: 4, rotation: Math.PI / 4,
+    });
+    expect(exitBlockingBooth([blocker], south)?.id).toBe('blk');
   });
 });
 

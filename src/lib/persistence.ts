@@ -16,7 +16,14 @@ export function loadPlan(): PlanState | null {
     if (!raw) return null;
     const data = JSON.parse(raw) as unknown;
     if (!isValidPlan(data)) return null;
-    return data;
+    // 迁移：旧版本没有 rotation 字段，补 0（轴对齐），尺寸保持未旋转原值。
+    return {
+      booths: data.booths.map((b) =>
+        typeof b.rotation === 'number' && Number.isFinite(b.rotation)
+          ? b
+          : { ...b, rotation: 0 },
+      ),
+    };
   } catch {
     return null;
   }
@@ -48,6 +55,8 @@ function isValidPlan(data: unknown): data is PlanState {
         o.orientation === 'east' ||
         o.orientation === 'south' ||
         o.orientation === 'west') &&
+        (o.rotation === undefined ||
+          (typeof o.rotation === 'number' && Number.isFinite(o.rotation))) &&
         (o.kind === undefined || o.kind === 'booth' || o.kind === 'partition')
     );
   });

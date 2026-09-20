@@ -10,7 +10,13 @@ import {
   HALL_WIDTH,
   PATH_GRID,
 } from '../constants';
-import { exitTargetPoints, rectOf } from './geometry';
+import {
+  exitTargetPoints,
+  footprint,
+  polygonsOverlap,
+  polygonAABB,
+  rectPolygon,
+} from './geometry';
 import type { Rect } from './geometry';
 
 export interface PathResult {
@@ -31,12 +37,14 @@ export function exitBlockingBooth(
 ): Booth | null {
   const cols = Math.round(HALL_WIDTH / g);
   const rows = Math.round(HALL_HEIGHT / g);
+  const polys = booths.map((b) => footprint(b));
   for (const t of exitTargetPoints([exitDef])) {
     const c = nearestCell(t, g);
-    if (isBlockedCell(c.cx, c.cy, booths, cols, rows, g)) {
+    if (isBlockedCell(c.cx, c.cy, booths, cols, rows, g, polys)) {
       const cell = cellRect(c.cx, c.cy, g);
-      const hit = booths.find((b) => rectsTouchIntersect(cell, rectOf(b)));
-      if (hit) return hit;
+      const cellPoly = rectPolygon(cell);
+      const idx = polys.findIndex((p) => polygonsOverlap(cellPoly, p));
+      if (idx >= 0) return booths[idx];
     }
   }
   return null;
@@ -46,8 +54,8 @@ function cellRect(cx: number, cy: number, g: number): Rect {
   return { x: cx * g, y: cy * g, w: g, h: g };
 }
 
-function rectsTouchIntersect(a: Rect, b: Rect): boolean {
-  // 与 geometry.intersects 同规则：仅边重合（可贴边）不算相交。
+/** AABB 粗筛：外接框不相交则多边形必不相交（仅加速，结论仍以 SAT 为准）。 */
+function aabbOverlap(a: Rect, b: Rect): boolean {
   return (
     a.x < b.x + b.w - EPS &&
     a.x + a.w > b.x + EPS &&
@@ -57,7 +65,8 @@ function rectsTouchIntersect(a: Rect, b: Rect): boolean {
 }
 
 /**
- * 判断某个网格单元中心所在单元是否被展位占据。
+ * 判断某个网格单元是否被展位占据：单元矩形与展位【旋转后】多边形做 SAT 判定，
+ * 仅边重合（可贴边通行）不算阻挡。与渲染/碰撞/净空使用同一个 footprint。
  * 导出供测试使用。
  */
 export function isBlockedCell(
@@ -67,11 +76,15 @@ export function isBlockedCell(
   cols: number,
   rows: number,
   g: number = PATH_GRID,
+  polys?: Point[][],
 ): boolean {
   if (cx < 0 || cy < 0 || cx >= cols || cy >= rows) return true;
-  const cell = cellRect(cx, cy, g);
-  for (const b of booths) {
-    if (rectsTouchIntersect(cell, rectOf(b))) return true;
+  const cellPoly = rectPolygon(cellRect(cx, cy, g));
+  const cellBox = cellRect(cx, cy, g);
+  for (let i = 0; i < booths.length; i++) {
+    const poly = polys?.[i] ?? footprint(booths[i]);
+    if (!aabbOverlap(cellBox, polygonAABB(poly))) continue;
+    if (polygonsOverlap(cellPoly, poly)) return true;
   }
   return false;
 }
@@ -85,7 +98,7 @@ function nearestCell(p: Point, g: number): { cx: number; cy: number } {
 
 /**
  * 从 start 寻路到任一出口。
- * @param booths 当前全部展位（障碍）
+ * @param booths 当前全部展位（障碍，按旋转后多边形栅格化）
  * @param start 起点（通常是展位接待点）
  */
 export function findExitPath(
@@ -96,13 +109,15 @@ export function findExitPath(
 ): PathResult {
   const cols = Math.round(HALL_WIDTH / g);
   const rows = Math.round(HALL_HEIGHT / g);
+  // 每个展位的旋转后多边形只计算一次，所有网格判定共用。
+  const polys = booths.map((b) => footprint(b));
 
   // 预计算障碍位图（展位越界部分自然落在网格外，不影响室内单元）。
   const blocked = new Uint8Array(cols * rows);
   let blockedCellCount = 0;
   for (let cy = 0; cy < rows; cy++) {
     for (let cx = 0; cx < cols; cx++) {
-      if (isBlockedCell(cx, cy, booths, cols, rows, g)) {
+      if (isBlockedCell(cx, cy, booths, cols, rows, g, polys)) {
         blocked[cy * cols + cx] = 1;
         blockedCellCount++;
       }
@@ -110,9 +125,9 @@ export function findExitPath(
   }
 
   const s = nearestCell(start, g);
-  // 起点被堵（例如正面紧贴另一展位）时，先尝试在 1 格范围内找最近的可行走单元。
+  // 起点被堵（例如正面紧贴另一展位）时，先尝试在 2 格范围内找最近的可行走单元。
   let startCell = s;
-  if (isBlockedCell(s.cx, s.cy, booths, cols, rows, g)) {
+  if (blocked[s.cy * cols + s.cx]) {
     const alt = nearestFreeNeighbor(s.cx, s.cy, blocked, cols, rows);
     if (!alt) {
       return { reachable: false, path: [], blockedCellCount };

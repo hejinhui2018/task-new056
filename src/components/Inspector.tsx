@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { Alert, Booth, Orientation } from '../types';
 import type { PlannerApi } from '../state/usePlanner';
 import { alertsForBooth } from '../lib/validation';
+import { worldOrientation } from '../lib/geometry';
 
 const ORIENTATIONS: { value: Orientation; label: string }[] = [
   { value: 'north', label: '朝北' },
@@ -115,6 +116,7 @@ function SelectedInspector({
   onAlertClick: (a: Alert) => void;
 }) {
   const myAlerts = alertsForBooth(planner.analysis, booth.id);
+  const facing = worldOrientation(booth);
 
   return (
     <>
@@ -205,7 +207,7 @@ function SelectedInspector({
         {ORIENTATIONS.map((o) => (
           <button
             key={o.value}
-            className={booth.orientation === o.value ? 'on' : ''}
+            className={facing === o.value ? 'on' : ''}
             onClick={() => planner.setOrientation(booth.id, o.value)}
           >
             {o.label}

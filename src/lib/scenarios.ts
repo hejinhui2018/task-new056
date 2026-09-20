@@ -32,6 +32,7 @@ export interface BoothSeed {
   w: number;
   h: number;
   label: string;
+  rotation?: number;
   orientation?: Booth['orientation'];
   color?: string;
   kind?: 'booth' | 'partition';
@@ -44,6 +45,7 @@ function makeBooths(seeds: BoothSeed[]): Booth[] {
     y: s.y,
     w: s.w,
     h: s.h,
+    rotation: s.rotation ?? 0,
     orientation: s.orientation ?? 'south',
     label: s.label,
     color: s.color ?? PALETTE[i % PALETTE.length],
@@ -94,6 +96,7 @@ export function newBoothAt(x: number, y: number, index: number): Booth {
     y,
     w: 3,
     h: 2,
+    rotation: 0,
     orientation: 'south',
     label: `B${String(index + 1).padStart(2, '0')}`,
     color: PALETTE[index % PALETTE.length],

@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
+  dragAnchor,
+  resizeLocal,
   screenDeltaToWorld,
   screenToWorld,
   snapDragPosition,
@@ -7,6 +9,7 @@ import {
   snapToGrid,
   worldToScreen,
 } from './grid';
+import { rotateVector } from './geometry';
 import { GRID_SIZE } from '../constants';
 
 describe('snapToGrid 0.5m 吸附', () => {
@@ -100,5 +103,102 @@ describe('拖拽吸附与尺寸吸附', () => {
     expect(snapResize(0.1)).toBe(GRID_SIZE);
     expect(snapResize(0.6)).toBe(0.5);
     expect(snapResize(0)).toBe(GRID_SIZE);
+  });
+});
+
+describe('dragAnchor 拖动中旋转', () => {
+  const D90 = Math.PI / 2;
+
+  it('未旋转时与 snapDragPosition 一致', () => {
+    const grab = { x: 1, y: 0.5 };
+    expect(dragAnchor({ x: 4, y: 2.5 }, grab, 0)).toEqual(
+      snapDragPosition(4, 2.5, grab),
+    );
+  });
+
+  it('旋转后抓取的是同一个局部点：锚点随角度正确偏移', () => {
+    // 抓取局部点 (1,0)；展位顺时针 90° 后该点在锚点下方 1 m。
+    const grab = { x: 1, y: 0 };
+    // 指针在 (5,7)：锚点 = (5,7) - 旋转后的(1,0)=(0,1) = (5,6)，再吸附
+    expect(dragAnchor({ x: 5, y: 7 }, grab, D90)).toEqual({ x: 5, y: 6 });
+    // 同一展位 180°：(1,0) -> (-1,0)，锚点 = (6,6)
+    expect(dragAnchor({ x: 5, y: 6 }, grab, Math.PI)).toEqual({ x: 6, y: 6 });
+    // 270°：(1,0) -> (0,-1)
+    expect(dragAnchor({ x: 5, y: 5 }, grab, 3 * D90)).toEqual({ x: 5, y: 6 });
+  });
+
+  it('模拟“拖动会话中途旋转”：同一局部抓取点在不同角度下都抓得准', () => {
+    // 会话开始：未旋转展位锚点 (2,2)，抓取局部中心 (1,1)
+    const grab = { x: 1, y: 1 };
+    // 先把指针放到抓取点（世界 (3,3)），算出的锚点应为 2,2
+    expect(dragAnchor({ x: 3, y: 3 }, grab, 0)).toEqual({ x: 2, y: 2 });
+    // 会话期间展位被旋转 90°（指针未动）：局部中心旋到 (-1,1)，
+    // 锚点 = (3,3)-(-1,1) = (4,2)——即展位绕抓取点保持贴合，不跳变。
+    expect(dragAnchor({ x: 3, y: 3 }, grab, D90)).toEqual({ x: 4, y: 2 });
+    // 再转 90°（180°）：(1,1)->(-1,-1)，锚点=(4,4)
+    expect(dragAnchor({ x: 3, y: 3 }, grab, Math.PI)).toEqual({ x: 4, y: 4 });
+  });
+
+  it('结果始终吸附到 0.5 m 网格（四档角度）', () => {
+    const grab = { x: 0.7, y: 0.3 };
+    for (const r of [0, D90, Math.PI, 3 * D90]) {
+      const p = dragAnchor({ x: 8.23, y: 6.61 }, grab, r);
+      expect(p.x % GRID_SIZE).toBeCloseTo(0, 9);
+      expect(p.y % GRID_SIZE).toBeCloseTo(0, 9);
+    }
+  });
+});
+
+describe('resizeLocal 缩放（含旋转后）', () => {
+  it('东/南手柄只改尺寸不动原点', () => {
+    expect(resizeLocal(3, 2, 'e', 4.5, 1)).toEqual({ ox: 0, oy: 0, w: 4.5, h: 2 });
+    expect(resizeLocal(3, 2, 's', 2, 3.5)).toEqual({ ox: 0, oy: 0, w: 3, h: 3.5 });
+  });
+
+  it('西/北手柄：新原点局部偏移与尺寸一致', () => {
+    // 左边拉到局部 x=0.5：宽变为 2.5，原点 x 右移 0.5
+    expect(resizeLocal(3, 2, 'w', 0.5, 1)).toEqual({ ox: 0.5, oy: 0, w: 2.5, h: 2 });
+    // 上边拉到局部 y=0.5：高 1.5，原点 y 下移 0.5
+    expect(resizeLocal(3, 2, 'n', 1, 0.5)).toEqual({ ox: 0, oy: 0.5, w: 3, h: 1.5 });
+  });
+
+  it('旋转 90° 后拖西手柄：局部原点偏移经旋转映射为世界向下', () => {
+    // 与 FloorPlan 缩放分支同一套映射：rotateVector(π/2, (0.5,0)) = (0,0.5)
+    const r = resizeLocal(3, 2, 'w', 0.5, 1);
+    const d = rotateVector(Math.PI / 2, { x: r.ox, y: r.oy });
+    expect(d.x).toBeCloseTo(0, 9);
+    expect(d.y).toBeCloseTo(0.5, 9);
+  });
+});
+
+describe('高缩放场景', () => {
+  it('极高缩放下屏幕位移精确换算为小米位移并吸附（不产生漂移）', () => {
+    // 600%：scale=240 像素/米；指针只移动 6 px = 0.025 m
+    const scale = 240;
+    const pan = { x: 40, y: 40 };
+    const w0 = screenToWorld(1000, 700, scale, pan);
+    const w1 = screenToWorld(1006, 700, scale, pan);
+    const d = screenDeltaToWorld(6, 0, scale);
+    expect(d.x).toBeCloseTo(0.025, 9);
+    // 两次换算差值与 delta 一致，无累计误差
+    expect(w1.x - w0.x).toBeCloseTo(0.025, 9);
+    // 高缩放下 dragAnchor 仍吸附到同一网格，亚网格抖动不产生脏位置
+    const grab = { x: 1, y: 1 };
+    const a = dragAnchor(w0, grab, 0);
+    const b = dragAnchor(w1, grab, 0);
+    expect(a.x % GRID_SIZE).toBeCloseTo(0, 9);
+    expect(b.x % GRID_SIZE).toBeCloseTo(0, 9);
+  });
+
+  it('旋转展位在高缩放下命中判定与渲染几何一致（点-多边形）', async () => {
+    const { pointInBooth } = await import('./geometry');
+    const booth = {
+      id: 'b', x: 4, y: 2, w: 6, h: 2,
+      rotation: Math.PI / 2, orientation: 'south' as const,
+      label: 'T', color: '#000', kind: 'booth' as const,
+    };
+    // 旋转后占据 x∈[2,4]、y∈[2,8]；边界两侧各取一个 1 mm 级的点
+    expect(pointInBooth(booth, { x: 3.999, y: 5 })).toBe(true);
+    expect(pointInBooth(booth, { x: 4.001, y: 5 })).toBe(false);
   });
 });

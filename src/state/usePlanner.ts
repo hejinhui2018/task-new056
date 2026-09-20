@@ -14,7 +14,7 @@ import { blockedExitScenario, emptyPlan, newBoothAt } from '../lib/scenarios';
 import { loadPlan, savePlan } from '../lib/persistence';
 import { GRID_SIZE } from '../constants';
 import { snapToGrid } from '../lib/grid';
-import { rotate90 } from '../lib/geometry';
+import { rotate90, withWorldOrientation } from '../lib/geometry';
 
 function planEquals(a: PlanState, b: PlanState): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
@@ -124,12 +124,12 @@ export function usePlanner() {
     if (selectedId) rotateBooth(selectedId);
   }, [rotateBooth, selectedId]);
 
-  /** 检查器：修改朝向（不交换宽高）。 */
+  /** 检查器：修改世界系正面朝向（内部反解为局部朝向，旋转后仍指向所选方向）。 */
   const setOrientation = useCallback(
     (id: string, orientation: Booth['orientation']) => {
       commitNow((prev) => ({
         booths: prev.booths.map((b) =>
-          b.id === id ? { ...b, orientation } : b,
+          b.id === id ? withWorldOrientation(b, orientation) : b,
         ),
       }));
     },

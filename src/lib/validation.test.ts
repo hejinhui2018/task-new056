@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import type { Booth } from '../types';
 import { analyzePlan, alertsForBooth } from './validation';
 import { blockedExitScenario } from './scenarios';
+import { rotate90 } from './geometry';
 
 function booth(p: Partial<Booth>): Booth {
   return {
@@ -10,6 +11,7 @@ function booth(p: Partial<Booth>): Booth {
     y: p.y ?? 0,
     w: p.w ?? 2,
     h: p.h ?? 2,
+    rotation: p.rotation ?? 0,
     orientation: p.orientation ?? 'south',
     label: p.label ?? p.id ?? 'T',
     color: '#000',
@@ -140,5 +142,87 @@ describe('内置“出口被堵”示例方案', () => {
         (a) => a.kind === 'no-path' && a.boothId === byLabel('A01').id,
       ),
     ).toBe(true);
+  });
+});
+
+describe('旋转几何在 analyzePlan 中的统一结论', () => {
+  const D90 = Math.PI / 2;
+
+  it('2×6 展位旋转 90° 靠近斜放围挡：有真实间距时不误报重叠', () => {
+    // 竖向展位：锚点 (4,0)，占据 x∈[2,4]、y∈[0,6]
+    const b = booth({ id: 'b', x: 4, y: 0, w: 6, h: 2, rotation: D90 });
+    // 45° 菱形围挡，下顶点（锚点）(2,6.6)，与展位角 (2,6) 留 0.6 m 直线间隙
+    const side = Math.SQRT2;
+    const part = booth({
+      id: 'p', x: 2, y: 6.6, w: side, h: side, rotation: Math.PI / 4, kind: 'partition',
+    });
+    const r = analyzePlan([b, part]);
+    expect(r.alerts.some((a) => a.kind === 'overlap')).toBe(false);
+    // 0.6 m < 1.5 m：净空仍应提示（净空与碰撞各按真实距离，不混为重叠）
+    const clearance = r.alerts.filter((a) => a.kind === 'clearance');
+    expect(clearance.length).toBe(1);
+    expect(clearance[0].message).toContain('0.6');
+    // 展位依旧可达
+    expect(r.paths[b.id].length).toBeGreaterThan(0);
+  });
+
+  it('斜角真正侵入时必须报重叠（不漏报）', () => {
+    const b = booth({ id: 'b', x: 4, y: 0, w: 6, h: 2, rotation: D90 });
+    // 同一菱形向下推进，顶点 (2,5.6) 刺入展位，斜边切出正面积重叠
+    const side = Math.SQRT2;
+    const part = booth({
+      id: 'p', x: 2, y: 5.6, w: side, h: side, rotation: Math.PI / 4, kind: 'partition',
+    });
+    const r = analyzePlan([b, part]);
+    expect(r.alerts.some((a) => a.kind === 'overlap')).toBe(true);
+  });
+
+  it('角点刚好接触：既不报重叠也不报净空（允许贴角）', () => {
+    // 菱形围挡顶点恰好落在展位角 (2,6)
+    const b = booth({ id: 'b', x: 4, y: 0, w: 6, h: 2, rotation: D90 });
+    const side = Math.SQRT2;
+    const part = booth({
+      id: 'p', x: 2, y: 6, w: side, h: side, rotation: Math.PI / 4, kind: 'partition',
+    });
+    const r = analyzePlan([b, part]);
+    expect(r.alerts.some((a) => a.kind === 'overlap')).toBe(false);
+    expect(r.alerts.some((a) => a.kind === 'clearance')).toBe(false);
+  });
+
+  it('旋转后角点越界报 out-of-bounds；转回 0° 后消失（外接框左上角不变）', () => {
+    // 6×2 展位恰好贴右下墙角放置，rotation=0 合法
+    const fit = booth({ id: 'b', x: 14, y: 12, w: 6, h: 2, rotation: 0 });
+    expect(
+      analyzePlan([fit]).alerts.some((a) => a.kind === 'out-of-bounds'),
+    ).toBe(false);
+
+    // 旋转 90°：外接框左上角仍 (14,12)，但变为 2×6，底边到 18 > 14 → 越界
+    const turned = rotate90(fit);
+    expect(turned.rotation % (Math.PI * 2)).toBeCloseTo(Math.PI / 2, 9);
+    const bad = analyzePlan([turned]);
+    expect(bad.alerts.some((a) => a.kind === 'out-of-bounds')).toBe(true);
+
+    // 再转三次（共一圈）回到原 6×2、原位置，越界消失
+    let restored = turned;
+    for (let i = 0; i < 3; i++) restored = rotate90(restored);
+    expect(restored.rotation % (Math.PI * 2)).toBeCloseTo(0, 9);
+    expect(restored.x).toBeCloseTo(14, 9);
+    expect(restored.y).toBeCloseTo(12, 9);
+    const ok = analyzePlan([restored]);
+    expect(ok.alerts.some((a) => a.kind === 'out-of-bounds')).toBe(false);
+  });
+
+  it('45° 斜放使角点越界也能识别', () => {
+    // 2×2 展位转 45° 后外接框半宽 √2/2·2≈1.414；锚点 x=19 时右缘到 20.414 > 20
+    const b = booth({ id: 'b', x: 19, y: 5, w: 2, h: 2, rotation: Math.PI / 4 });
+    const r = analyzePlan([b]);
+    expect(r.alerts.some((a) => a.kind === 'out-of-bounds')).toBe(true);
+  });
+
+  it('旋转展位的接待点随旋转改变，空展厅仍可达出口', () => {
+    const b = booth({ id: 'b', x: 9, y: 6, w: 4, h: 2, rotation: D90, orientation: 'east' });
+    const r = analyzePlan([b]);
+    expect(r.alerts).toEqual([]);
+    expect(r.paths[b.id].length).toBeGreaterThan(1);
   });
 });

@@ -124,7 +124,7 @@ export function usePlanner() {
     if (selectedId) rotateBooth(selectedId);
   }, [rotateBooth, selectedId]);
 
-  /** 检查器：修改朝向（不交换宽高）。 */
+  /** 检查器：修改朝向（不改变占地形状/角度，仅移动接待点方向）。 */
   const setOrientation = useCallback(
     (id: string, orientation: Booth['orientation']) => {
       commitNow((prev) => ({
@@ -136,17 +136,20 @@ export function usePlanner() {
     [commitNow],
   );
 
-  /** 检查器：修改标签/数值字段（数值吸附到网格）。 */
+  /** 检查器：修改标签/数值字段（坐标与尺寸吸附到网格，角度直接取值）。 */
   const updateBoothField = useCallback(
     (
       id: string,
-      field: 'label' | 'x' | 'y' | 'w' | 'h',
+      field: 'label' | 'x' | 'y' | 'w' | 'h' | 'rotation',
       value: string | number,
     ) => {
       commitNow((prev) => ({
         booths: prev.booths.map((b) => {
           if (b.id !== id) return b;
           if (field === 'label') return { ...b, label: String(value) };
+          if (field === 'rotation') {
+            return { ...b, rotation: ((Number(value) % 360) + 360) % 360 };
+          }
           const num = snapToGrid(Math.max(GRID_SIZE, Number(value) || 0));
           return { ...b, [field]: num };
         }),

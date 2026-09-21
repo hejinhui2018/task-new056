@@ -8,13 +8,21 @@ export interface Point {
   y: number;
 }
 
-/** 轴对齐矩形展位。x/y 为左上角坐标；w/h 为未旋转尺寸。 */
+/**
+ * 展位。x/y 为本地（未旋转）包围矩形左上角；w/h 为未旋转尺寸；
+ * rotation 为绕矩形中心顺时针旋转的角度（度，可为任意值，旋钮每次 +90°）。
+ * 渲染、命中、碰撞、越界、净空与寻路障碍一律取旋转后的多边形 footprint，
+ * 不允许再用未旋转的 w/h 外接矩形作最终结论。
+ */
 export interface Booth {
   id: string;
   x: number;
   y: number;
   w: number;
   h: number;
+  /** 绕中心顺时针旋转角（度）。0/90/180/270 为常用值，几何支持任意角。 */
+  rotation: number;
+  /** 接待点（正面）方向；旋转旋钮时随 rotation 同步转动。 */
   orientation: Orientation;
   label: string;
   color: string;

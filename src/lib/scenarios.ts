@@ -33,6 +33,8 @@ export interface BoothSeed {
   h: number;
   label: string;
   orientation?: Booth['orientation'];
+  /** 绕中心顺时针旋转角（度），默认 0（轴对齐）。 */
+  rotation?: number;
   color?: string;
   kind?: 'booth' | 'partition';
 }
@@ -44,11 +46,20 @@ function makeBooths(seeds: BoothSeed[]): Booth[] {
     y: s.y,
     w: s.w,
     h: s.h,
+    rotation: normalizeAngle(s.rotation ?? 0),
     orientation: s.orientation ?? 'south',
     label: s.label,
     color: s.color ?? PALETTE[i % PALETTE.length],
     kind: s.kind ?? 'booth',
   }));
+}
+
+/** 角度归一化到 [0,360)，去掉 360/720 与浮点尾巴。 */
+export function normalizeAngle(deg: number): number {
+  const a = ((deg % 360) + 360) % 360;
+  // 消除 -0 与 90.0000000001 一类浮点尾巴
+  const r = Math.round(a);
+  return Math.abs(a - r) < 1e-7 ? r % 360 : a;
 }
 
 export function emptyPlan(): PlanState {
@@ -94,6 +105,7 @@ export function newBoothAt(x: number, y: number, index: number): Booth {
     y,
     w: 3,
     h: 2,
+    rotation: 0,
     orientation: 'south',
     label: `B${String(index + 1).padStart(2, '0')}`,
     color: PALETTE[index % PALETTE.length],

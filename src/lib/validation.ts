@@ -5,11 +5,10 @@
 import type { Alert, AnalysisResult, Booth, Point } from '../types';
 import { CLEARANCE, EXITS } from '../constants';
 import {
+  boothsOverlap,
   clearanceViolation,
   outOfBounds,
   receptionPoint,
-  rectOf,
-  intersects,
 } from './geometry';
 import { exitBlockingBooth, findExitPath } from './pathfinding';
 
@@ -69,7 +68,7 @@ export function analyzePlan(booths: Booth[]): AnalysisResult {
       // 围挡是设施隔断，允许彼此拼接（不互相检查重叠/净空）；仍作为寻路障碍。
       if (a.kind === 'partition' && b.kind === 'partition') continue;
       const [lo, hi] = pairKey(a.id, b.id);
-      if (intersects(rectOf(a), rectOf(b))) {
+      if (boothsOverlap(a, b)) {
         alerts.push({
           id: `overlap:${lo}:${hi}`,
           kind: 'overlap',

@@ -15,12 +15,53 @@ function booth(p: Partial<Booth> & Pick<Partial<Booth>, never>): Booth {
     y: p.y ?? 0,
     w: p.w ?? 2,
     h: p.h ?? 2,
+    rotation: p.rotation ?? 0,
     orientation: p.orientation ?? 'south',
     label: p.label ?? 'T',
     color: '#000',
     kind: p.kind ?? 'booth',
   };
 }
+
+describe('旋转展位作为寻路障碍（统一 footprint）', () => {
+  // 2×6 旋转 90°：本地盒 x[5,7]y[1,7]，实际占地 x[3,9]×y[3,5]
+  const rotated = () =>
+    booth({ id: 'rot', x: 5, y: 1, w: 2, h: 6, rotation: 90, kind: 'partition' });
+  const cols = Math.round(HALL_WIDTH / PATH_GRID);
+  const rows = Math.round(HALL_HEIGHT / PATH_GRID);
+
+  it('实际占地内的网格被阻挡', () => {
+    const b = rotated();
+    // (6,4) 中心 -> 格 (12,8)
+    expect(isBlockedCell(12, 8, [b], cols, rows)).toBe(true);
+    // (4,3.5) 在实际占地内（x∈[3,9],y∈[3,5]）-> 格 (8,7)
+    expect(isBlockedCell(8, 7, [b], cols, rows)).toBe(true);
+  });
+
+  it('旧本地外接盒的角部（实际占地外）不被阻挡', () => {
+    const b = rotated();
+    // (6,1.5) 与 (6,6.5) 在旧外接盒内但实际占地（y∈[3,5]）之外 -> 格 (12,3)/(12,13)
+    expect(isBlockedCell(12, 3, [b], cols, rows)).toBe(false);
+    expect(isBlockedCell(12, 13, [b], cols, rows)).toBe(false);
+  });
+
+  it('旋转展位边缘相贴的格子仍可通行（正面积才阻挡）', () => {
+    const b = rotated();
+    // 格心 y=5.25（格 cy=10）紧邻实际占地下沿(y=5)，不被阻挡
+    expect(isBlockedCell(12, 10, [b], cols, rows)).toBe(false);
+  });
+
+  it('45° 斜围挡：菱形占地外的网格不被旧外接矩形误挡，路径可绕行', () => {
+    // 3×0.5 围挡旋转 45°，本地外接盒很大但实际是细菱形
+    const wall = booth({ id: 'w', x: 4.5, y: 6.04, w: 3, h: 0.5, rotation: 45, kind: 'partition' });
+    const b = booth({ id: 's', x: 1, y: 1, w: 2, h: 2, orientation: 'south' });
+    const r = findExitPath([wall, b], receptionPoint(b));
+    expect(r.reachable).toBe(true);
+    // 路径不穿越菱形：本地外接盒角 (4.75,6.25) 实际在菱形外，应可作为可行格
+    // （用 isBlockedCell 验证该旧外接盒角未被误挡）
+    expect(isBlockedCell(9, 12, [wall], cols, rows)).toBe(false);
+  });
+});
 
 describe('findExitPath 疏散寻路', () => {
   it('空展厅：任意接待点可达出口，路径起点正确', () => {

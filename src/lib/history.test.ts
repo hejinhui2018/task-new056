@@ -3,7 +3,7 @@ import { History } from './history';
 import type { PlanState } from '../types';
 
 function state(n: number): PlanState {
-  return { booths: [{ id: String(n), x: n, y: 0, w: 1, h: 1, orientation: 'south' as const, label: String(n), color: '#000' }] };
+  return { booths: [{ id: String(n), x: n, y: 0, w: 1, h: 1, rotation: 0, orientation: 'south' as const, label: String(n), color: '#000' }] };
 }
 
 describe('History 撤销/重做', () => {

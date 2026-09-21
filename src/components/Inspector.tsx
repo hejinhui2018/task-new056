@@ -75,12 +75,14 @@ function CommitInput({
   type = 'text',
   step,
   min,
+  max,
   onCommit,
 }: {
   value: string | number;
   type?: string;
   step?: number;
   min?: number;
+  max?: number;
   onCommit: (raw: string) => void;
 }) {
   const [draft, setDraft] = useState(String(value));
@@ -94,6 +96,7 @@ function CommitInput({
       type={type}
       step={step}
       min={min}
+      max={max}
       value={draft}
       onChange={(e) => setDraft(e.target.value)}
       onBlur={commit}
@@ -197,6 +200,26 @@ function SelectedInspector({
             value={booth.h}
             onCommit={(raw) => planner.updateBoothField(booth.id, 'h', raw)}
           />
+        </div>
+      </div>
+
+      <h4>旋转角度（度，绕中心顺时针）</h4>
+      <div className="field-row">
+        <div className="field">
+          <label>角度</label>
+          <CommitInput
+            type="number"
+            min={0}
+            max={359.5}
+            step={0.5}
+            value={booth.rotation}
+            onCommit={(raw) => planner.updateBoothField(booth.id, 'rotation', raw)}
+          />
+        </div>
+        <div className="field" style={{ justifyContent: 'flex-end' }}>
+          <button className="tb" onClick={() => planner.rotateBooth(booth.id)}>
+            ⟳ 转 90°
+          </button>
         </div>
       </div>
 

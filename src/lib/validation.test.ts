@@ -10,12 +10,79 @@ function booth(p: Partial<Booth>): Booth {
     y: p.y ?? 0,
     w: p.w ?? 2,
     h: p.h ?? 2,
+    rotation: p.rotation ?? 0,
     orientation: p.orientation ?? 'south',
     label: p.label ?? p.id ?? 'T',
     color: '#000',
     kind: p.kind ?? 'booth',
   };
 }
+
+describe('旋转几何端到端一致性', () => {
+  it('2×6 展位转 90° 后靠近斜放围挡：有真间隙时不误报重叠', () => {
+    const r = booth({ id: 'r', x: 5, y: 1, w: 2, h: 6, rotation: 90, orientation: 'east' });
+    const p = booth({
+      id: 'p', x: 4.5, y: 6.04, w: 3, h: 0.5, rotation: 45, kind: 'partition',
+    });
+    const res = analyzePlan([r, p]);
+    expect(res.alerts.some((a) => a.kind === 'overlap')).toBe(false);
+    // 真间隙约 0.05m < 1.5 -> 净空告警（围挡也参与对普通展位的净空检查）
+    expect(res.alerts.some((a) => a.kind === 'clearance')).toBe(true);
+  });
+
+  it('两个斜角真正侵入时必须报 overlap（不漏报）', () => {
+    const a = booth({ id: 'a', x: 1, y: 1, w: 2, h: 2, rotation: 0 });
+    const b = booth({ id: 'b', x: 3.2, y: 1, w: 2, h: 2, rotation: 45 });
+    const res = analyzePlan([a, b]);
+    expect(res.alerts.some((al) => al.kind === 'overlap')).toBe(true);
+  });
+
+  it('角点刚好接触：不重叠（贴边/斜角可通行），其它特征足够远时无净空告警', () => {
+    const a = booth({ id: 'a', x: 0, y: 0, w: 2, h: 2, rotation: 0 });
+    // 3×3 旋转 45°，半对角 3√2/2≈2.121；左顶点恰好落在 A 右上角 (2,2)，
+    // 其余顶点距 A 均 ≥1.5
+    const h = (3 * Math.SQRT2) / 2;
+    const d = booth({
+      id: 'd',
+      x: 2 + h - 1.5,
+      y: 2 - 1.5,
+      w: 3,
+      h: 3,
+      rotation: 45,
+    });
+    const res = analyzePlan([a, d]);
+    expect(res.alerts.some((al) => al.kind === 'overlap')).toBe(false);
+    expect(res.alerts.some((al) => al.kind === 'clearance')).toBe(false);
+  });
+
+  it('旋转后越界报 out-of-bounds，且接待点仍可寻路（若在界内）', () => {
+    // 45° 旋转把角甩出右下墙
+    const bad = booth({ id: 'bad', x: 16, y: 10, w: 4, h: 4, rotation: 45 });
+    const res = analyzePlan([bad]);
+    expect(res.alerts.some((a) => a.kind === 'out-of-bounds')).toBe(true);
+    // 转回 0°（贴墙）越界消失
+    const ok = analyzePlan([{ ...bad, rotation: 0 }]);
+    expect(ok.alerts.some((a) => a.kind === 'out-of-bounds')).toBe(false);
+  });
+
+  it('净空提示与疏散网格结论一致：窄间隙不阻挡网格但报净空', () => {
+    // 两个普通展位水平净距 1.0m（中间 0.5 网格可通行），报净空但路径仍可达
+    const a = booth({ id: 'a', x: 0, y: 0, w: 2, h: 2 });
+    const b = booth({ id: 'b', x: 3, y: 0, w: 2, h: 2 });
+    const res = analyzePlan([a, b]);
+    expect(res.alerts.some((al) => al.kind === 'clearance')).toBe(true);
+    expect(res.alerts.some((al) => al.kind === 'overlap')).toBe(false);
+    expect(res.paths.a.length).toBeGreaterThan(0);
+    expect(res.paths.b.length).toBeGreaterThan(0);
+  });
+
+  it('旋转普通展位的接待点随朝向/角度落到正确世界位置并可寻路', () => {
+    const r = booth({ id: 'r', x: 5, y: 1, w: 2, h: 6, rotation: 90, orientation: 'east' });
+    const res = analyzePlan([r]);
+    expect(res.alerts.filter((a) => a.kind === 'no-path')).toEqual([]);
+    expect(res.paths.r.length).toBeGreaterThan(0);
+  });
+});
 
 describe('analyzePlan', () => {
   it('空方案：无告警', () => {

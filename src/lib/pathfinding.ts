@@ -10,8 +10,8 @@ import {
   HALL_WIDTH,
   PATH_GRID,
 } from '../constants';
-import { exitTargetPoints, rectOf } from './geometry';
-import type { Rect } from './geometry';
+import { exitTargetPoints, footprint, polysOverlapPositive } from './geometry';
+import type { Polygon } from './geometry';
 
 export interface PathResult {
   reachable: boolean;
@@ -20,8 +20,6 @@ export interface PathResult {
   /** 调试/测试用：本次搜索的障碍信息 */
   blockedCellCount: number;
 }
-
-const EPS = 1e-9;
 
 /** 出口开口内侧网格是否全部可通行；任一目标格被展位占据即视为出口被堵。 */
 export function exitBlockingBooth(
@@ -34,30 +32,29 @@ export function exitBlockingBooth(
   for (const t of exitTargetPoints([exitDef])) {
     const c = nearestCell(t, g);
     if (isBlockedCell(c.cx, c.cy, booths, cols, rows, g)) {
-      const cell = cellRect(c.cx, c.cy, g);
-      const hit = booths.find((b) => rectsTouchIntersect(cell, rectOf(b)));
+      const cell = cellPolygon(c.cx, c.cy, g);
+      const hit = booths.find((b) => polysOverlapPositive(cell, footprint(b)));
       if (hit) return hit;
     }
   }
   return null;
 }
 
-function cellRect(cx: number, cy: number, g: number): Rect {
-  return { x: cx * g, y: cy * g, w: g, h: g };
-}
-
-function rectsTouchIntersect(a: Rect, b: Rect): boolean {
-  // 与 geometry.intersects 同规则：仅边重合（可贴边）不算相交。
-  return (
-    a.x < b.x + b.w - EPS &&
-    a.x + a.w > b.x + EPS &&
-    a.y < b.y + b.h - EPS &&
-    a.y + a.h > b.y + EPS
-  );
+function cellPolygon(cx: number, cy: number, g: number): Polygon {
+  const x = cx * g;
+  const y = cy * g;
+  // 与 footprint 相同的角点顺序：左上、右上、右下、左下
+  return [
+    { x, y },
+    { x: x + g, y },
+    { x: x + g, y: y + g },
+    { x, y: y + g },
+  ];
 }
 
 /**
  * 判断某个网格单元中心所在单元是否被展位占据。
+ * 与展位的旋转后 footprint 做“正面积”相交：边相不算阻挡，允许贴边通行。
  * 导出供测试使用。
  */
 export function isBlockedCell(
@@ -69,9 +66,9 @@ export function isBlockedCell(
   g: number = PATH_GRID,
 ): boolean {
   if (cx < 0 || cy < 0 || cx >= cols || cy >= rows) return true;
-  const cell = cellRect(cx, cy, g);
+  const cell = cellPolygon(cx, cy, g);
   for (const b of booths) {
-    if (rectsTouchIntersect(cell, rectOf(b))) return true;
+    if (polysOverlapPositive(cell, footprint(b))) return true;
   }
   return false;
 }

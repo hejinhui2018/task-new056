@@ -15,26 +15,43 @@ import {
   HALL_WIDTH,
 } from '../constants';
 import {
+  boothsOverlap,
+  clearanceViolation,
+  footprint,
   frontEdge,
+  localToWorld,
+  polygonIntersection,
   receptionPoint,
-  rectOf,
-  intersects,
 } from '../lib/geometry';
-import { screenToWorld, snapResize, snapToGrid } from '../lib/grid';
+import type { Polygon } from '../lib/geometry';
+import { screenToWorld, snapToGrid } from '../lib/grid';
+import { computeResize, rotationDrag } from '../lib/interaction';
 
 type HandleId = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 
 interface DragSession {
   type: 'drag';
   boothId: string;
-  /** 抓取点相对展位左上角的偏移（米） */
+  /** 抓取点相对展位【中心】的世界偏移（米）；拖动时中心=指针-偏移，旋转保持不变 */
   grab: Point;
 }
 interface ResizeSession {
   type: 'resize';
   boothId: string;
   handle: HandleId;
-  start: { x: number; y: number; w: number; h: number };
+  /** 会话开始时的本地（未旋转）矩形；指针先映回本地坐标再缩放 */
+  start: { x: number; y: number; w: number; h: number; rotation: number };
+}
+interface RotateSession {
+  type: 'rotate';
+  boothId: string;
+  /** 按下时指针相对中心的方位角（度） */
+  startPointerAngle: number;
+  /** 按下时展位角度与朝向，用于累计转动量 */
+  startRotation: number;
+  startOrientation: Booth['orientation'];
+  /** 是否已发生实际拖拽（区分点击=顺时针转 90°） */
+  moved: boolean;
 }
 interface PanSession {
   type: 'pan';
@@ -42,9 +59,8 @@ interface PanSession {
   startPan: Point;
   moved: boolean;
 }
-type Session = DragSession | ResizeSession | PanSession;
+type Session = DragSession | ResizeSession | RotateSession | PanSession;
 
-const MIN_SIZE = GRID_SIZE;
 // 缩放倍率上下限（相对于“适应窗口”的基准比例）
 const ZOOM_RATIO_MIN = 0.3;
 const ZOOM_RATIO_MAX = 6;
@@ -211,10 +227,11 @@ export function FloorPlan({
     (e.target as Element).setPointerCapture?.(e.pointerId);
     planner.selectBooth(b.id);
     const w = toWorld(e.clientX, e.clientY);
+    // 抓取偏移相对【中心】：拖动 = 中心平移世界位移，旋转角与尺寸全程不变。
     setSession({
       type: 'drag',
       boothId: b.id,
-      grab: { x: w.x - b.x, y: w.y - b.y },
+      grab: { x: w.x - (b.x + b.w / 2), y: w.y - (b.y + b.h / 2) },
     });
   };
 
@@ -226,7 +243,23 @@ export function FloorPlan({
       type: 'resize',
       boothId: b.id,
       handle,
-      start: { x: b.x, y: b.y, w: b.w, h: b.h },
+      start: { x: b.x, y: b.y, w: b.w, h: b.h, rotation: b.rotation },
+    });
+  };
+
+  /** 旋转钮：原地点击 = 顺时针 90°；拖动手势 = 任意角度自由旋转。 */
+  const startRotate = (e: React.PointerEvent, b: Booth) => {
+    e.stopPropagation();
+    (e.target as Element).setPointerCapture?.(e.pointerId);
+    planner.selectBooth(b.id);
+    const w = toWorld(e.clientX, e.clientY);
+    setSession({
+      type: 'rotate',
+      boothId: b.id,
+      startPointerAngle: Math.atan2(w.y - (b.y + b.h / 2), w.x - (b.x + b.w / 2)),
+      startRotation: b.rotation,
+      startOrientation: b.orientation,
+      moved: false,
     });
   };
 
@@ -253,27 +286,57 @@ export function FloorPlan({
         setPan(clampPan({ x: s.startPan.x + dx, y: s.startPan.y + dy }, scale));
         return;
       }
+      const booth = planner.booths.find((x) => x.id === s.boothId);
+      if (!booth) return;
       const w = toWorld(e.clientX, e.clientY);
       if (s.type === 'drag') {
-        // 允许拖出边界以演示“越界”告警，但限制在展厅附近、且保留可见部分。
+        // 中心平移：世界中心=指针-抓取偏移；本地宽高与角度不变。
+        // 最终吸附/钳制的是本地左上角（沿用 0.5m 网格与越界演示范围）。
+        const cx = w.x - s.grab.x;
+        const cy = w.y - s.grab.y;
         const nx = Math.min(
-          HALL_WIDTH - MIN_SIZE,
-          Math.max(-4, snapToGrid(w.x - s.grab.x)),
+          HALL_WIDTH - GRID_SIZE,
+          Math.max(-4, snapToGrid(cx - booth.w / 2)),
         );
         const ny = Math.min(
-          HALL_HEIGHT - MIN_SIZE,
-          Math.max(-4, snapToGrid(w.y - s.grab.y)),
+          HALL_HEIGHT - GRID_SIZE,
+          Math.max(-4, snapToGrid(cy - booth.h / 2)),
         );
         planner.liveUpdateBooth(s.boothId, { x: nx, y: ny });
-      } else {
-        const patch = applyHandle(s.start, s.handle, w.x, w.y);
+      } else if (s.type === 'resize') {
+        const patch = computeResize(s.start, s.handle, w);
         planner.liveUpdateBooth(s.boothId, patch);
+      } else {
+        // 自由旋转：指针相对中心的方位角增量累加到起始角度。
+        const c = { x: booth.x + booth.w / 2, y: booth.y + booth.h / 2 };
+        const ang = Math.atan2(w.y - c.y, w.x - c.x);
+        const res = rotationDrag(
+          {
+            rotation: s.startRotation,
+            orientation: s.startOrientation,
+            pointerAngle: s.startPointerAngle,
+          },
+          ang,
+          e.shiftKey ? 5 : 0.5,
+        );
+        // 未越过点击阈值时不改动展位，保证“点击旋钮”最终是干净的 +90°。
+        if (!res.moved) return;
+        s.moved = true;
+        planner.liveUpdateBooth(s.boothId, {
+          rotation: res.rotation,
+          orientation: res.orientation,
+        });
       }
     };
 
     const onUp = () => {
       const s = sessionRef.current;
-      if (s && s.type !== 'pan') planner.commitInteraction();
+      if (s && s.type === 'rotate' && !s.moved) {
+        // 原地点击旋钮 = 顺时针转 90°（独立一条历史）。
+        planner.rotateBooth(s.boothId);
+      } else if (s && s.type !== 'pan') {
+        planner.commitInteraction();
+      }
       if (s?.type === 'pan') panMovedRef.current = s.moved;
       setSession(null);
     };
@@ -310,10 +373,15 @@ export function FloorPlan({
     if (activeAlert.relatedBoothId)
       activeBoothIds.add(activeAlert.relatedBoothId);
   }
-  const overlapRegions: Rect[] = [];
+  // 真实重叠区域：两旋转多边形的相交多边形（围挡之间允许拼接，跳过）。
+  const overlapRegions: Polygon[] = [];
   for (let i = 0; i < booths.length; i++) {
     for (let j = i + 1; j < booths.length; j++) {
-      const reg = intersectionRect(rectOf(booths[i]), rectOf(booths[j]));
+      if (booths[i].kind === 'partition' && booths[j].kind === 'partition') {
+        continue;
+      }
+      if (!boothsOverlap(booths[i], booths[j])) continue;
+      const reg = polygonIntersection(footprint(booths[i]), footprint(booths[j]));
       if (reg) overlapRegions.push(reg);
     }
   }
@@ -419,14 +487,11 @@ export function FloorPlan({
               );
             })}
 
-          {/* 重叠区域红斜纹 */}
-          {overlapRegions.map((r, i) => (
-            <rect
+          {/* 重叠区域红斜纹（旋转多边形真实相交区域） */}
+          {overlapRegions.map((poly, i) => (
+            <polygon
               key={`ov-${i}`}
-              x={r.x}
-              y={r.y}
-              width={r.w}
-              height={r.h}
+              points={poly.map((p) => `${p.x},${p.y}`).join(' ')}
               fill="url(#hatch-red)"
               stroke="#b91c1c"
               strokeWidth={1.2 * u}
@@ -453,7 +518,7 @@ export function FloorPlan({
               reachable={(analysis.paths[b.id]?.length ?? 0) > 0}
               onPointerDown={(e) => startBoothDrag(e, b)}
               onHandleDown={(e, h) => startResize(e, b, h)}
-              onRotate={() => planner.rotateBooth(b.id)}
+              onRotateStart={(e) => startRotate(e, b)}
               onAlertClick={(a) => {
                 planner.selectBooth(b.id);
                 onActiveAlertChange(a.id);
@@ -749,7 +814,7 @@ interface BoothViewProps {
   reachable: boolean;
   onPointerDown: (e: React.PointerEvent) => void;
   onHandleDown: (e: React.PointerEvent, h: HandleId) => void;
-  onRotate: () => void;
+  onRotateStart: (e: React.PointerEvent) => void;
   onAlertClick: (a: Alert) => void;
 }
 
@@ -762,47 +827,54 @@ function BoothView({
   reachable,
   onPointerDown,
   onHandleDown,
-  onRotate,
+  onRotateStart,
   onAlertClick,
 }: BoothViewProps) {
   const isPartition = b.kind === 'partition';
   const [p1, p2] = frontEdge(b);
   const recv = receptionPoint(b);
+  const c = { x: b.x + b.w / 2, y: b.y + b.h / 2 };
+  const poly = footprint(b);
+  const pointsAttr = poly.map((p) => `${p.x},${p.y}`).join(' ');
   // 去重告警类型，同类型只显示一个徽标
   const badgeAlerts = alerts.filter(
     (a, i, arr) => arr.findIndex((x) => x.kind === a.kind) === i,
   );
+  const labelFs = Math.min(
+    isPartition ? 0.3 : 0.34,
+    Math.max(0.2, (isPartition ? Math.max(b.w, b.h) : b.h) * 0.26),
+  );
 
   return (
     <g>
-      {/* 围挡斜纹底 */}
-      {isPartition && (
+      {/* 主体：rect 绕中心旋转，渲染形状即 footprint；命中同样落在该旋转形状上 */}
+      <g transform={`rotate(${b.rotation} ${c.x} ${c.y})`}>
+        {isPartition && (
+          <rect
+            x={b.x}
+            y={b.y}
+            width={b.w}
+            height={b.h}
+            fill="url(#hatch-partition)"
+            pointerEvents="none"
+          />
+        )}
         <rect
           x={b.x}
           y={b.y}
           width={b.w}
           height={b.h}
-          fill="url(#hatch-partition)"
-          pointerEvents="none"
+          rx={0.06}
+          fill={isPartition ? '#a1887f' : b.color}
+          fillOpacity={isPartition ? 0.92 : alerts.length ? 0.55 : 0.85}
+          stroke={selected ? '#1d4ed8' : '#1f2937'}
+          strokeWidth={(selected ? 2.6 : 1.4) * u}
+          style={{ cursor: 'move' }}
+          onPointerDown={onPointerDown}
         />
-      )}
-      {/* 主体 */}
-      <rect
-        x={b.x}
-        y={b.y}
-        width={b.w}
-        height={b.h}
-        rx={0.06}
-        fill={isPartition ? '#a1887f' : b.color}
-        fillOpacity={isPartition ? 0.92 : alerts.length ? 0.55 : 0.85}
-        stroke={selected ? '#1d4ed8' : '#1f2937'}
-        strokeWidth={(selected ? 2.6 : 1.4) * u}
-        strokeDasharray={isPartition ? `${0.0} ${0.0}` : undefined}
-        style={{ cursor: 'move' }}
-        onPointerDown={onPointerDown}
-      />
+      </g>
 
-      {/* 正面：粗线 + 朝向小三角（围挡不画正面） */}
+      {/* 正面：粗线 + 朝向小三角（围挡不画正面），端点取旋转后正面边 */}
       {!isPartition && (
         <>
           <line
@@ -819,42 +891,44 @@ function BoothView({
         </>
       )}
 
-      {/* 标签与尺寸 */}
-      <text
-        x={b.x + b.w / 2}
-        y={b.y + b.h / 2 + (isPartition ? 0.04 : -0.05)}
-        textAnchor="middle"
-        fontSize={Math.min(
-          isPartition ? 0.3 : 0.34,
-          Math.max(0.2, (isPartition ? Math.max(b.w, b.h) : b.h) * 0.26),
-        )}
-        fill={isPartition ? '#4e342e' : '#fff'}
-        fontWeight={700}
-        pointerEvents="none"
-        style={{ paintOrder: 'stroke' }}
-        stroke={isPartition ? 'none' : 'rgba(0,0,0,0.25)'}
-        strokeWidth={0.04}
-        transform={
-          isPartition && b.h > b.w
-            ? `rotate(-90 ${b.x + b.w / 2} ${b.y + b.h / 2})`
-            : undefined
-        }
-      >
-        {b.label}
-        {isPartition ? '（围挡）' : ''}
-      </text>
-      {!isPartition && (
-        <text
-          x={b.x + b.w / 2}
-          y={b.y + b.h / 2 + 0.3}
-          textAnchor="middle"
-          fontSize={0.2}
-          fill="rgba(255,255,255,0.92)"
-          pointerEvents="none"
+      {/* 标签与尺寸：随展位旋转，居中于同一点 */}
+      <g transform={`rotate(${b.rotation} ${c.x} ${c.y})`} pointerEvents="none">
+        {/* 竖向围挡（本地 h>w）标签在旋转组内再转 -90°，与原竖排效果一致 */}
+        <g
+          transform={
+            isPartition && b.h > b.w
+              ? `rotate(-90 ${c.x} ${c.y})`
+              : undefined
+          }
         >
-          {b.w}×{b.h} m · 正面{orientText(b.orientation)}
-        </text>
-      )}
+          <text
+            x={c.x}
+            y={c.y + 0.04}
+            textAnchor="middle"
+            fontSize={labelFs}
+            fill={isPartition ? '#4e342e' : '#fff'}
+            fontWeight={700}
+            style={{ paintOrder: 'stroke' }}
+            stroke={isPartition ? 'none' : 'rgba(0,0,0,0.25)'}
+            strokeWidth={0.04}
+          >
+            {b.label}
+            {isPartition ? '（围挡）' : ''}
+          </text>
+        </g>
+        {!isPartition && (
+          <text
+            x={c.x}
+            y={c.y + 0.3}
+            textAnchor="middle"
+            fontSize={0.2}
+            fill="rgba(255,255,255,0.92)"
+          >
+            {b.w}×{b.h} m · {Math.round(b.rotation)}° · 正面
+            {orientText(b.orientation)}
+          </text>
+        )}
+      </g>
 
       {/* 接待点（围挡没有接待点） */}
       {!isPartition && (
@@ -877,15 +951,11 @@ function BoothView({
         </>
       )}
 
-      {/* 告警描边（每种类型一层虚线，形状/颜色双重区分） */}
+      {/* 告警描边（每种类型一层虚线，沿旋转后 footprint，形状/颜色双重区分） */}
       {badgeAlerts.map((a) => (
-        <rect
+        <polygon
           key={a.id}
-          x={b.x}
-          y={b.y}
-          width={b.w}
-          height={b.h}
-          rx={0.06}
+          points={pointsAttr}
           fill="none"
           stroke={KIND_STYLE[a.kind].color}
           strokeWidth={(emphasized ? 4 : 2.2) * u}
@@ -901,12 +971,13 @@ function BoothView({
         />
       ))}
 
-      {/* 告警字符徽标（不只靠颜色表达） */}
+      {/* 告警字符徽标：贴在旋转后的“本地左上角”角点旁 */}
       <g>
         {badgeAlerts.map((a, i) => {
           const st = KIND_STYLE[a.kind];
-          const bx = b.x + 0.18 + i * 0.34;
-          const by = b.y - 0.18;
+          const anchor = poly[0];
+          const bx = anchor.x + 0.18 + i * 0.34;
+          const by = anchor.y - 0.18;
           return (
             <g
               key={`badge-${a.id}`}
@@ -926,81 +997,78 @@ function BoothView({
         })}
       </g>
 
-      {/* 选中：8 手柄 + 旋转钮 */}
+      {/* 选中：8 手柄（世界坐标=本地手柄点旋转后）+ 旋转钮 */}
       {selected && (
         <g pointerEvents="none">
           {(['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'] as HandleId[]).map(
             (h) => {
               const p = handlePos(b, h);
               return (
-                <rect
-                  key={h}
-                  x={p.x - 0.11}
-                  y={p.y - 0.11}
-                  width={0.22}
-                  height={0.22}
-                  rx={0.03}
-                  fill="#fff"
+                <g key={h}>
+                  {/* 可见白色手柄 */}
+                  <rect
+                    x={p.x - 0.11}
+                    y={p.y - 0.11}
+                    width={0.22}
+                    height={0.22}
+                    rx={0.03}
+                    fill="#fff"
+                    stroke="#1d4ed8"
+                    strokeWidth={1.8 * u}
+                  />
+                  {/* 放大的隐形热区 */}
+                  <rect
+                    x={p.x - 0.2}
+                    y={p.y - 0.2}
+                    width={0.4}
+                    height={0.4}
+                    rx={0.03}
+                    fill="transparent"
+                    pointerEvents="all"
+                    style={{ cursor: handleCursor(h, b.rotation), touchAction: 'none' }}
+                    onPointerDown={(e) => onHandleDown(e, h)}
+                  />
+                </g>
+              );
+            },
+          )}
+          {/* 旋转钮：在本地顶边中点外侧 0.55m，随展位旋转；可点击转 90°，可拖动自由转 */}
+          {(() => {
+            const top = localToWorld(b, { x: c.x, y: b.y });
+            const knob = localToWorld(b, { x: c.x, y: b.y - 0.55 });
+            return (
+              <>
+                <line
+                  x1={top.x}
+                  y1={top.y}
+                  x2={knob.x}
+                  y2={knob.y}
                   stroke="#1d4ed8"
-                  strokeWidth={1.8 * u}
-                  pointerEvents="all"
-                  style={{ cursor: handleCursor(h), touchAction: 'none' }}
-                  onPointerDown={(e) => onHandleDown(e, h)}
+                  strokeWidth={1.4 * u}
                 />
-              );
-            },
-          )}
-          {/* 放大的隐形热区 */}
-          {(['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'] as HandleId[]).map(
-            (h) => {
-              const p = handlePos(b, h);
-              return (
-                <rect
-                  key={`hit-${h}`}
-                  x={p.x - 0.2}
-                  y={p.y - 0.2}
-                  width={0.4}
-                  height={0.4}
-                  fill="transparent"
+                <circle
+                  cx={knob.x}
+                  cy={knob.y}
+                  r={0.16}
+                  fill="#1d4ed8"
                   pointerEvents="all"
-                  style={{ cursor: handleCursor(h), touchAction: 'none' }}
-                  onPointerDown={(e) => onHandleDown(e, h)}
+                  style={{ cursor: 'grab', touchAction: 'none' }}
+                  onPointerDown={onRotateStart}
                 />
-              );
-            },
-          )}
-          <circle
-            cx={b.x + b.w / 2}
-            cy={b.y - 0.55}
-            r={0.16}
-            fill="#1d4ed8"
-            pointerEvents="all"
-            style={{ cursor: 'pointer' }}
-            onPointerDown={(e) => e.stopPropagation()}
-            onClick={(e) => {
-              e.stopPropagation();
-              onRotate();
-            }}
-          />
-          <text
-            x={b.x + b.w / 2}
-            y={b.y - 0.49}
-            textAnchor="middle"
-            fontSize={0.2}
-            fill="#fff"
-            fontWeight={700}
-            pointerEvents="none"
-          >
-            ⟳
-          </text>
-          <line
-            x1={b.x + b.w / 2}
-            y1={b.y - 0.38}
-            x2={b.x + b.w / 2}
-            y2={b.y - 0.05}
-            stroke="#1d4ed8"
-            strokeWidth={1.4 * u}
-          />
+                <text
+                  x={knob.x}
+                  y={knob.y + 0.07}
+                  textAnchor="middle"
+                  fontSize={0.2}
+                  fill="#fff"
+                  fontWeight={700}
+                  pointerEvents="none"
+                >
+                  ⟳
+                </text>
+              </>
+            );
+          })()}
         </g>
       )}
     </g>
@@ -1013,35 +1081,26 @@ function orientText(o: Booth['orientation']): string {
   )[o];
 }
 
+/** 正面小三角：正面边中点沿世界朝向向外。 */
 function FrontArrow({ b, u }: { b: Booth; u: number }) {
-  const cx = b.x + b.w / 2;
-  const cy = b.y + b.h / 2;
+  const [e1, e2] = frontEdge(b);
+  const mid = { x: (e1.x + e2.x) / 2, y: (e1.y + e2.y) / 2 };
+  const dir = {
+    north: { x: 0, y: -1 },
+    south: { x: 0, y: 1 },
+    west: { x: -1, y: 0 },
+    east: { x: 1, y: 0 },
+  }[b.orientation];
+  // 正面边方向（垂直于朝向）
+  const par = { x: e2.x - e1.x, y: e2.y - e1.y };
+  const plen = Math.hypot(par.x, par.y) || 1;
+  const px = par.x / plen;
+  const py = par.y / plen;
   const s = 0.13;
-  let tip: Point;
-  let base1: Point;
-  let base2: Point;
-  switch (b.orientation) {
-    case 'north':
-      tip = { x: cx, y: b.y - 0.16 };
-      base1 = { x: cx - s, y: b.y - 0.02 };
-      base2 = { x: cx + s, y: b.y - 0.02 };
-      break;
-    case 'south':
-      tip = { x: cx, y: b.y + b.h + 0.16 };
-      base1 = { x: cx - s, y: b.y + b.h + 0.02 };
-      base2 = { x: cx + s, y: b.y + b.h + 0.02 };
-      break;
-    case 'west':
-      tip = { x: b.x - 0.16, y: cy };
-      base1 = { x: b.x - 0.02, y: cy - s };
-      base2 = { x: b.x - 0.02, y: cy + s };
-      break;
-    case 'east':
-      tip = { x: b.x + b.w + 0.16, y: cy };
-      base1 = { x: b.x + b.w + 0.02, y: cy - s };
-      base2 = { x: b.x + b.w + 0.02, y: cy + s };
-      break;
-  }
+  const tip = { x: mid.x + dir.x * 0.16, y: mid.y + dir.y * 0.16 };
+  const base = { x: mid.x + dir.x * 0.02, y: mid.y + dir.y * 0.02 };
+  const base1 = { x: base.x - px * s, y: base.y - py * s };
+  const base2 = { x: base.x + px * s, y: base.y + py * s };
   return (
     <polygon
       points={`${tip.x},${tip.y} ${base1.x},${base1.y} ${base2.x},${base2.y}`}
@@ -1053,87 +1112,54 @@ function FrontArrow({ b, u }: { b: Booth; u: number }) {
   );
 }
 
+/** 手柄在世界坐标中的位置：本地手柄点按展位角度旋转。 */
 function handlePos(b: Booth, h: HandleId): Point {
   const cx = b.x + b.w / 2;
   const cy = b.y + b.h / 2;
+  let local: Point;
   switch (h) {
     case 'nw':
-      return { x: b.x, y: b.y };
+      local = { x: b.x, y: b.y };
+      break;
     case 'n':
-      return { x: cx, y: b.y };
+      local = { x: cx, y: b.y };
+      break;
     case 'ne':
-      return { x: b.x + b.w, y: b.y };
+      local = { x: b.x + b.w, y: b.y };
+      break;
     case 'e':
-      return { x: b.x + b.w, y: cy };
+      local = { x: b.x + b.w, y: cy };
+      break;
     case 'se':
-      return { x: b.x + b.w, y: b.y + b.h };
+      local = { x: b.x + b.w, y: b.y + b.h };
+      break;
     case 's':
-      return { x: cx, y: b.y + b.h };
+      local = { x: cx, y: b.y + b.h };
+      break;
     case 'sw':
-      return { x: b.x, y: b.y + b.h };
+      local = { x: b.x, y: b.y + b.h };
+      break;
     case 'w':
-      return { x: b.x, y: cy };
+      local = { x: b.x, y: cy };
+      break;
   }
+  return localToWorld(b, local);
 }
 
-function handleCursor(h: HandleId): string {
-  if (h === 'n' || h === 's') return 'ns-resize';
-  if (h === 'e' || h === 'w') return 'ew-resize';
+/** 缩放手柄光标：把世界拖拽方向折算回本地轴，旋转后光标仍贴合手柄方向。 */
+function handleCursor(h: HandleId, rotationDeg: number): string {
+  if (h === 'n' || h === 's' || h === 'e' || h === 'w') {
+    const quarter = (Math.round(rotationDeg / 90) % 4 + 4) % 4;
+    // 单向手柄：n/s 与 e/w 在 90° 旋转后互换
+    const vertical = h === 'n' || h === 's';
+    const swap = quarter % 2 === 1;
+    return vertical !== swap ? 'ns-resize' : 'ew-resize';
+  }
   if (h === 'nw' || h === 'se') return 'nwse-resize';
   return 'nesw-resize';
 }
 
-/* ================= 缩放手柄几何 ================= */
-
-function applyHandle(
-  start: { x: number; y: number; w: number; h: number },
-  handle: HandleId,
-  worldX: number,
-  worldY: number,
-): Partial<Booth> {
-  const px = snapToGrid(worldX);
-  const py = snapToGrid(worldY);
-  let { x, y, w, h } = start;
-
-  if (handle.includes('e')) {
-    w = snapResize(px - start.x);
-  }
-  if (handle.includes('w')) {
-    const left = Math.min(px, start.x + start.w - MIN_SIZE);
-    w = snapResize(start.x + start.w - left);
-    x = snapToGrid(start.x + start.w - w);
-  }
-  if (handle.includes('s')) {
-    h = snapResize(py - start.y);
-  }
-  if (handle.includes('n')) {
-    const top = Math.min(py, start.y + start.h - MIN_SIZE);
-    h = snapResize(start.y + start.h - top);
-    y = snapToGrid(start.y + start.h - h);
-  }
-  return { x, y, w, h };
-}
-
 /* ================= 几何辅助 ================= */
-
-interface Rect {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
-function intersectionRect(a: Rect, b: Rect): Rect | null {
-  if (!intersects(a, b)) return null;
-  const x = Math.max(a.x, b.x);
-  const y = Math.max(a.y, b.y);
-  return {
-    x,
-    y,
-    w: Math.min(a.x + a.w, b.x + b.w) - x,
-    h: Math.min(a.y + a.h, b.y + b.h) - y,
-  };
-}
 
 interface ClearanceMark {
   x1: number;
@@ -1143,38 +1169,17 @@ interface ClearanceMark {
   label: string;
 }
 
+/** 净空尺寸标注：取两旋转多边形真实最近点连线（与判定同一几何结论）。 */
 function clearanceDimension(a: Booth, b: Booth): ClearanceMark | null {
-  const ra = rectOf(a);
-  const rb = rectOf(b);
-  const gapX = Math.max(rb.x - (ra.x + ra.w), ra.x - (rb.x + rb.w));
-  const gapY = Math.max(rb.y - (ra.y + ra.h), ra.y - (rb.y + rb.h));
-  if (gapX > 0 && gapY <= 0) {
-    const left = ra.x < rb.x ? ra : rb;
-    const right = ra.x < rb.x ? rb : ra;
-    const cy =
-      (Math.max(ra.y, rb.y) + Math.min(ra.y + ra.h, rb.y + rb.h)) / 2;
-    return {
-      x1: left.x + left.w,
-      y1: cy,
-      x2: right.x,
-      y2: cy,
-      label: `${Math.round(gapX * 100) / 100} m`,
-    };
-  }
-  if (gapY > 0 && gapX <= 0) {
-    const top = ra.y < rb.y ? ra : rb;
-    const bottom = ra.y < rb.y ? rb : ra;
-    const cx =
-      (Math.max(ra.x, rb.x) + Math.min(ra.x + ra.w, rb.x + rb.w)) / 2;
-    return {
-      x1: cx,
-      y1: top.y + top.h,
-      x2: cx,
-      y2: bottom.y,
-      label: `${Math.round(gapY * 100) / 100} m`,
-    };
-  }
-  return null;
+  const v = clearanceViolation(a, b);
+  if (!v) return null;
+  return {
+    x1: v.pa.x,
+    y1: v.pa.y,
+    x2: v.pb.x,
+    y2: v.pb.y,
+    label: `${Math.round(v.gap * 100) / 100} m`,
+  };
 }
 
 function DimensionMark({
@@ -1187,7 +1192,12 @@ function DimensionMark({
 }) {
   const midX = (m.x1 + m.x2) / 2;
   const midY = (m.y1 + m.y2) / 2;
-  const horizontal = m.y1 === m.y2;
+  // 刻度垂直于最近点连线（连线可能斜向）
+  const dx = m.x2 - m.x1;
+  const dy = m.y2 - m.y1;
+  const len = Math.hypot(dx, dy) || 1;
+  const nx = (-dy / len) * 0.1;
+  const ny = (dx / len) * 0.1;
   return (
     <g pointerEvents="none">
       <line
@@ -1221,17 +1231,8 @@ function DimensionMark({
       >
         {m.label}
       </text>
-      {horizontal ? (
-        <>
-          <line x1={m.x1} y1={m.y1 - 0.1} x2={m.x1} y2={m.y1 + 0.1} stroke="#b45309" strokeWidth={1.4 * u} />
-          <line x1={m.x2} y1={m.y2 - 0.1} x2={m.x2} y2={m.y2 + 0.1} stroke="#b45309" strokeWidth={1.4 * u} />
-        </>
-      ) : (
-        <>
-          <line x1={m.x1 - 0.1} y1={m.y1} x2={m.x1 + 0.1} y2={m.y1} stroke="#b45309" strokeWidth={1.4 * u} />
-          <line x1={m.x2 - 0.1} y1={m.y2} x2={m.x2 + 0.1} y2={m.y2} stroke="#b45309" strokeWidth={1.4 * u} />
-        </>
-      )}
+      <line x1={m.x1 - nx} y1={m.y1 - ny} x2={m.x1 + nx} y2={m.y1 + ny} stroke="#b45309" strokeWidth={1.4 * u} />
+      <line x1={m.x2 - nx} y1={m.y2 - ny} x2={m.x2 + nx} y2={m.y2 + ny} stroke="#b45309" strokeWidth={1.4 * u} />
     </g>
   );
 }
